@@ -1,0 +1,383 @@
+#! /usr/local/bin/python
+"""
+gitreport
+
+Description:
+    Tools and utilities for creating filename-centric git reports
+ToDo:
+    Add support for specifying the number of commits
+"""
+# Python libraries
+import argparse
+import datetime
+import logging
+import os
+import re
+import tempfile
+
+
+# ==============================================================================
+# CONSTANTS / GLOBALS
+# ==============================================================================
+# logging
+LOGGER = logging.getLogger(__name__)
+LOGGER.setLevel(logging.INFO)
+LOGGER.addHandler(logging.StreamHandler())
+
+# general
+__THIS__ = os.path.basename(__file__)
+__DESCRIPTION__ = """
+Description:
+    Generates a list of all files committed to git within a given date range"""
+
+# report details
+LOG_DIR = tempfile.gettempdir()
+LOG_FILE_HTML = os.path.join(LOG_DIR, "gitreport.html")
+
+# html
+DATE_PATTERN = "^\d{4}-\d{2}-\d{2}$|\d+\.\w+"
+
+REPORT_TEMPLATE = """
+  <b>sha1: </b><span style=" color:rgb(36, 99, 163); font-weight: bold">{sha1}</span><br>
+  <b>comments: </b><span style=" color: rgb(75, 165, 36); font-weight: bold">{comment}</span><br>
+  {modules}"""
+
+DOCUMENT_TEMPLATE = """
+<div>
+  <p>
+    {message}<br>
+  </p><br>
+
+  <h4style="color: rgb(189, 19, 152); font-weight: bold"><hr>{header}<hr></h4>
+  <p>
+  {report}
+  </p><br>
+</div>"""
+
+
+# ==============================================================================
+# GENERAL FUNCTIONS
+# ==============================================================================
+def _getConsoleMessage(msgData):
+    """
+    creates an console git report message from the given message data
+
+    :param msgData: message data
+    :type msgData: dict
+    :return: an html message
+    :rtype: string
+    """
+    message = ""
+
+    # header
+    symbols = '-' * 80
+    start = msgData.get('start', 'unknown')
+    end = msgData.get('end', 'unknown')
+    # header = '\033[1;35m{0}\n{1} --> {2}\n{0}\033[0m\n'.format(symbols, start, end)
+    header = '\033[1;35m{0}\nPackage Report: {1} --> {2}\n{0}\033[0m\n'.format(symbols, start, end)
+    message += header
+
+    # build report body
+    commit_data = msgData.get('commit_data', {})
+    first_pkg = True
+    for sha1, data in sorted(commit_data.items()):
+        # package release data
+        committer = data.get("committer", "unknown")
+        comment = data.get("comment", "none")
+        filepaths = data.get("filepaths", [])
+
+        # sha1
+        sha1 = '\033[1;34m{}\033[0m'.format(sha1)
+        if first_pkg:
+            message += "sha1: {}\n".format(sha1)
+            first_pkg = False
+        else:
+            message += "\nsha1: {}\n".format(sha1)
+
+        # comment
+        message += "comment: \033[1;32m{}\033[0m\n".format(comment)
+
+        # file paths
+        for f in sorted(filepaths):
+            message += "{0:12s}: {1}\n".format(committer, f)
+
+    return message
+
+
+def _getHtmlMessage(msgData):
+    """
+    creates an html git report message from the given message data
+
+    :param msgData: message data
+    :type msgData: dict
+    :return: an html message
+    :rtype: string
+    """
+    document_data = {"message": "",
+                     "header": "",
+                     "report": "",
+                     "url": ""}
+    # message
+    start = msgData.get('start', 'unknown')
+    end = msgData.get('end', 'unknown')
+    document_data["message"] = 'The following is a list of all rigging_dev commits released since: {}'.format(start)
+
+    # report header
+    document_data["header"] = "Package Report: {} --> {}".format(start, end)
+
+    # build report body
+    commit_data = msgData.get('commit_data', {})
+    for sha1, data in sorted(commit_data.items()):
+        # package release data
+        tmp = {
+            "sha1": sha1,
+            "comment": data.get('comment', 'unknown'),
+            "modules": ""}
+        committer = data.get('committer', 'unknown')
+        for each in data.get('filepaths', []):
+            tmp["modules"] += "{}: {}<br/>\n  ".format(committer, each)
+        tmp["modules"] += "<br/>"
+
+        document_data["report"] += REPORT_TEMPLATE.format(**tmp)
+
+    document_data["url"] = msgData.get('url', 'unknown')
+
+    document = DOCUMENT_TEMPLATE.format(**document_data)
+    return document
+
+
+def getGitReport(repo_path=None, start=None, end=None, days=1, log_path=None,
+                 remote_branch='master', show_user=True, url=None, verbose=True):
+    """
+    Returns a dictionary of data pertaining to all files modified between the
+    given start data and end date. If no start date is given then the start date
+    will be today and the end date will be today - the number of days specified
+    by `days`.
+
+    Please note that the `start` and `end` parameters must follow the format:
+    "<year>-<month>-<day>" example: "2015-10-31"
+
+
+    :param repo_path: Top level directory for an SVN code repository
+                      If None, defaults to module constant: DEFAULT_REPO_PATH
+    :type repo_path: {string, None}
+    :param start: Start date given in the format: "year-month-day"
+    :type start: {None, string}
+    :param end: End date given in the format: "year-month-day"
+    :type end: {None, string}
+    :param days: Number of days preceding the start date that you wish to check for
+    :type days: int
+    :param log_path: Name of the temporary file to store results of git log command
+                     If None, defaults to module constant: LOG_FILE_TEXT
+    :type log_path: {string, None}
+    :param remote_branch: Name of the remote branch to show updates for
+    :type remote_branch: string
+    :param show_user: Option to show whish user committed which files
+    :type show_user: bool
+    :param url: Name of a url where repo documentation can be found
+    :type url: string
+    :return: Modified file data in the following format:
+    :rtype: dictionary
+    """
+    # get start and end date
+    today = datetime.date.today()
+    delta = datetime.timedelta(days=days)
+
+    if not start:
+        start = today - delta
+        start = start.strftime("%Y-%m-%d")
+
+    if not end:
+        end = today.strftime("%Y-%m-%d")
+
+    # check date formats
+    if not re.match(DATE_PATTERN, start):
+        msg = "Invalid start date format: {}. Must match the following pattern: {}".format(start, DATE_PATTERN)
+        raise ValueError(msg)
+
+    if not re.match(DATE_PATTERN, end):
+        msg = "Invalid start end format: {}. Must match the following pattern: {}".format(end, DATE_PATTERN)
+        raise ValueError(msg)
+
+    # check paths
+    if not repo_path:
+        repo_path = os.getcwd()
+
+    # build the report command line string -------------------------------------
+    command = "git log --since {0} --until {1} --name-only --date=short --decorate=short".format(start, end)
+    command += " --pretty=format:\"SHA1:{1}{0}DATE:{2}{0}COMMITTER:{3}{0}COMMENT:{4}{0}\" origin/{5}".format(
+        "%n",
+        "%H",
+        "%cd",
+        "%cn",
+        "%s",
+        remote_branch)
+
+    # parse git report ---------------------------------------------------------
+    log_data = {"start": start,
+                "end": end,
+                "repo_path": repo_path,
+                "remote_branch": remote_branch,
+                "commit_data": {},
+                "url": url}
+
+    sha1 = None
+    for line in os.popen(command):
+        line = line.strip()
+        if not line:
+            continue
+
+        # get commit hash
+        if "SHA1" in line:
+            sha1 = line.split(':')[-1]
+            log_data["commit_data"][sha1] = {
+                "committer": "unknown",
+                "comment": "...",
+                "filepaths": []}
+            continue
+
+        # get committer
+        if "COMMITTER" in line:
+            committer = line.split(':')[-1]
+            log_data["commit_data"][sha1]["committer"] = committer
+            continue
+
+        # get comments
+        if "COMMENT" in line:
+            comment = line.split(':')[-1]
+            log_data["commit_data"][sha1]["comment"] = comment
+            continue
+
+        # get committed files
+        if line not in log_data["commit_data"][sha1]["filepaths"]:
+            log_data["commit_data"][sha1]["filepaths"].append(line)
+
+    # Create reports  ----------------------------------------------------------
+    console_msg = _getConsoleMessage(log_data)
+    if verbose:
+        LOGGER.info(console_msg)
+
+    # write report out to file
+    if log_path:
+        # write html doc
+        html_msg = _getHtmlMessage(log_data)
+        with open(log_path, 'w') as outfile:
+            outfile.write(html_msg)
+        msg = 'Report written to: {}'.format(log_path)
+        LOGGER.info(msg)
+
+    return log_path
+
+
+def main():
+    """
+    Command line entry point function
+
+    :return: N/A
+    :rvalue: N/A
+    """
+    # define argument parser
+    parser = argparse.ArgumentParser(prog=__THIS__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter,
+                                     description=__DESCRIPTION__)
+
+    # add command line args
+    parser.add_argument(
+        "-rp", "--repoPath",
+        action="store",
+        default='',
+        type=str,
+        help="Root directory of a local repository filesystem",
+        metavar="")
+
+    parser.add_argument(
+        "-s", "--start",
+        action="store",
+        default='',
+        type=str,
+        help="The start date given in the format: YYYY-MM-DD",
+        metavar="")
+
+    parser.add_argument(
+        "-e", "--end",
+        action="store",
+        default='',
+        type=str,
+        help="The end date given in the format: YYYY-MM-DD",
+        metavar="")
+
+    parser.add_argument(
+        "-d", "--days",
+        action="store",
+        default=1,
+        type=int,
+        help="Number of days from today to go back",
+        metavar="")
+
+    parser.add_argument(
+        "-lp", "--logPath",
+        action="store",
+        default=LOG_FILE_HTML,
+        type=str,
+        help="Temporary file to write the git log results to.\nDefault: {0}".format(LOG_FILE_HTML),
+        metavar="")
+
+    parser.add_argument(
+        "-rb", "--remoteBranch",
+        action="store",
+        default='master',
+        type=str,
+        help="Name of the remote repository branch to inspect",
+        metavar="")
+
+    parser.add_argument(
+        "-u", "--showUser",
+        action="store",
+        default=False,
+        type=bool,
+        help="Option to show which user committed which files",
+        metavar="")
+
+    cwd = os.getcwd()
+    pkg = os.path.basename(cwd)
+    confluence_url = "https://atlas.bydeluxe.com/confluence/display/MPIPEDOCS/{0}".format(pkg)
+    parser.add_argument(
+        "-url", "--url",
+        action="store",
+        default=confluence_url,
+        type=str,
+        help="Option to show a url containing documentation for your remote repo",
+        metavar="")
+
+    parser.add_argument(
+        "-v", "--verbose",
+        action="store",
+        default=True,
+        type=bool,
+        help="Option to print out the full report",
+        metavar="")
+
+    # parse command line arguments
+    args = parser.parse_args()
+    repo_path = args.repoPath
+    start = args.start
+    end = args.end
+    days = args.days
+    log_path = args.logPath
+    remote_branch = args.remoteBranch
+    url = args.url
+    verbose = args.verbose
+
+    # print git log results
+    getGitReport(repo_path=repo_path,
+                 start=start,
+                 end=end,
+                 days=days,
+                 log_path=log_path,
+                 remote_branch=remote_branch,
+                 url=url,
+                 verbose=verbose)
+
+
+if __name__ == "__main__":
+    main()

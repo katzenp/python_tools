@@ -1,0 +1,13 @@
+# Python
+*.py[cwd]
+
+# build system
+build*
+
+# IDE
+*.idea
+*.pydevproject
+
+# Miscellaneous
+*.DS_Store
+*.temp

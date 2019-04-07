@@ -1,0 +1,100 @@
+#! /usr/local/bin/python
+"""
+release
+
+Description:
+    Module description
+"""
+import os
+import re
+import shutil
+import logging
+
+
+# ==============================================================================
+# Constants / Gobals
+# ==============================================================================
+logging.basicConfig(format='[%(levelname)s] %(message)s', level=logging.WARNING)
+LOGGER = logging.getLogger(__name__)
+
+DEV_ROOT = os.path.dirname(__file__)
+while True:
+    if DEV_ROOT.endswith('tools'):
+        DEV_ROOT = os.path.dirname(DEV_ROOT)
+        break
+
+RELEASE_ROOT = 'C:\\sw\\release\\tools'
+
+
+# ==============================================================================
+# General functions
+# ==============================================================================
+def cleanTree(root_dir, patterns=[], verbose=True, delete=False):
+    # error check parameters
+    if isinstance(patterns, basestring):
+        patterns = [patterns]
+
+    # build deletion pattern
+    del_pattern = '|'.join(patterns)
+
+    # initialize logging
+    if verbose:
+        LOGGER.setLevel(logging.DEBUG)
+        if delete:
+            LOGGER.warn("Removing Files/Directories")
+        else:
+            LOGGER.info("Reporting files/directories")
+
+    # remove directories and files
+    for root, dirnames, filenames in os.walk(root_dir):
+        # remove directories
+        for d in dirnames:
+            if re.search(del_pattern, d):
+                path = os.path.join(root, d)
+                msg = "\t{0}".format(path)
+                LOGGER.info(msg)
+                if delete:
+                    shutil.rmtree(path)
+
+        # remove files
+        for f in filenames:
+            if re.search(del_pattern, f):
+                path = os.path.join(root, f)
+                msg = "\t{0}".format(path)
+                LOGGER.info(msg)
+                if delete:
+                    os.remove(path)
+
+
+def publish(src_dir=DEV_ROOT, dst_dir=RELEASE_ROOT, rm_patterns=["\.git.*", "\.py[cow]$"], verbose=True, clean=False):
+    # check source  and destination directories
+    if not src_dir or not os.path.isdir(src_dir):
+        msg = "[Source Root Directory] No such file/directory: {0}".format(src_dir)
+        raise OSError(msg)
+
+    if not dst_dir or not os.path.isdir(dst_dir):
+        os.makedirs(dst_dir)
+        msg = "[Destination Root Directory] Creating publish directory: {0}".format(dst_dir)
+        print msg
+
+    # find highest version
+    count = 0
+    for d in os.listdir(dst_dir):
+        if d == "highest":
+            continue
+        if re.search("v\d+", d):
+            count += 1
+    # increment version
+    count += 1
+    next_version = "v{0:04d}".format(count)
+    dst_dir = os.path.join(dst_dir, next_version)
+
+    # copy dev to release
+    shutil.copytree(src_dir, dst_dir, symlinks=True)
+
+    # Clean the publish directory
+    cleanTree(dst_dir, rm_patterns, verbose, clean)
+
+
+if __name__ == "__main__":
+    publish(clean=False)
